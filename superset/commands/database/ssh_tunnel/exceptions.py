@@ -25,37 +25,43 @@ from superset.commands.exceptions import (
 )
 
 
-class SSHTunnelDeleteFailedError(DeleteFailedError):
+class SSHTunnelError(Exception):
+    """
+    Base class.
+    """
+
+
+class SSHTunnelDeleteFailedError(SSHTunnelError, DeleteFailedError):
     message = _("SSH Tunnel could not be deleted.")
 
 
-class SSHTunnelNotFoundError(CommandException):
+class SSHTunnelNotFoundError(SSHTunnelError, CommandException):
     status = 404
     message = _("SSH Tunnel not found.")
 
 
-class SSHTunnelInvalidError(CommandInvalidError):
+class SSHTunnelInvalidError(SSHTunnelError, CommandInvalidError):
     message = _("SSH Tunnel parameters are invalid.")
 
 
-class SSHTunnelDatabasePortError(CommandInvalidError):
+class SSHTunnelDatabasePortError(SSHTunnelError, CommandInvalidError):
     message = _("A database port is required when connecting via SSH Tunnel.")
 
 
-class SSHTunnelUpdateFailedError(UpdateFailedError):
+class SSHTunnelUpdateFailedError(SSHTunnelError, UpdateFailedError):
     message = _("SSH Tunnel could not be updated.")
 
 
-class SSHTunnelCreateFailedError(CommandException):
+class SSHTunnelCreateFailedError(SSHTunnelError, CommandException):
     message = _("Creating SSH Tunnel failed for an unknown reason")
 
 
-class SSHTunnelingNotEnabledError(CommandException):
+class SSHTunnelingNotEnabledError(SSHTunnelError, CommandException):
     status = 400
     message = _("SSH Tunneling is not enabled")
 
 
-class SSHTunnelRequiredFieldValidationError(ValidationError):
+class SSHTunnelRequiredFieldValidationError(SSHTunnelError, ValidationError):
     def __init__(self, field_name: str) -> None:
         super().__init__(
             [_("Field is required")],
@@ -63,9 +69,9 @@ class SSHTunnelRequiredFieldValidationError(ValidationError):
         )
 
 
-class SSHTunnelMissingCredentials(CommandInvalidError):
+class SSHTunnelMissingCredentials(SSHTunnelError, CommandInvalidError):
     message = _("Must provide credentials for the SSH Tunnel")
 
 
-class SSHTunnelInvalidCredentials(CommandInvalidError):
+class SSHTunnelInvalidCredentials(SSHTunnelError, CommandInvalidError):
     message = _("Cannot have multiple credentials for the SSH Tunnel")

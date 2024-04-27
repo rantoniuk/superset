@@ -346,17 +346,55 @@ class SupersetSecurityManager(  # pylint: disable=too-many-public-methods
             return self.get_guest_user_from_request(request)
         return None
 
+    def get_catalog_perm(
+        self,
+        database: str,
+        catalog: Optional[str] = None,
+    ) -> Optional[str]:
+        """
+        Return the database specific catalog permission.
+
+        :param database: The Superset database or database name
+        :param catalog: The database catalog name
+        :return: The database specific schema permission
+        """
+        if catalog is None:
+            return None
+
+        return f"[{database}].[{catalog}]"
+
     def get_schema_perm(
-        self, database: Union["Database", str], schema: Optional[str] = None
+        self,
+        database: str,
+        catalog: Optional[str] = None,
+        schema: Optional[str] = None,
     ) -> Optional[str]:
         """
         Return the database specific schema permission.
 
-        :param database: The Superset database or database name
-        :param schema: The Superset schema name
+        Catalogs were added in SIP-95, and not all databases support them. Because of
+        this, the format used for permissions is different depending on whether a
+        catalog is passed or not:
+
+            [database].[schema]
+            [database].[catalog].[schema]
+
+        For backwards compatibility, when processing the first format Superset should
+        use the default catalog when the database supports them. This way, migrating
+        existing permissions is not necessary.
+
+        :param database: The database name
+        :param catalog: The database catalog name
+        :param schema: The database schema name
         :return: The database specific schema permission
         """
-        return f"[{database}].[{schema}]" if schema else None
+        if schema is None:
+            return None
+
+        if catalog:
+            return f"[{database}].[{catalog}].[{schema}]"
+
+        return f"[{database}].[{schema}]"
 
     @staticmethod
     def get_database_perm(database_id: int, database_name: str) -> Optional[str]:
@@ -435,6 +473,16 @@ class SupersetSecurityManager(  # pylint: disable=too-many-public-methods
             or self.can_access("database_access", database.perm)  # type: ignore
         )
 
+    def can_access_catalog(self, database: "Database", catalog: str) -> bool:
+        """
+        Return if the user can access the specified catalog.
+        """
+        return (
+            self.can_access_all_datasources()
+            or self.can_access_database(database)
+            or self.can_access("catalog_access", f"[{database}].[{catalog}]")
+        )
+
     def can_access_schema(self, datasource: "BaseDatasource") -> bool:
         """
         Return True if the user can access the schema associated with specified
@@ -447,6 +495,7 @@ class SupersetSecurityManager(  # pylint: disable=too-many-public-methods
         return (
             self.can_access_all_datasources()
             or self.can_access_database(datasource.database)
+            or self.can_access_catalog(datasource.database, datasource.catalog)
             or self.can_access("schema_access", datasource.schema_perm or "")
         )
 
@@ -705,43 +754,133 @@ class SupersetSecurityManager(  # pylint: disable=too-many-public-methods
         ]
 
     def get_schemas_accessible_by_user(
-        self, database: "Database", schemas: list[str], hierarchical: bool = True
-    ) -> list[str]:
+        self,
+        database: "Database",
+        catalog: Optional[str],
+        schemas: set[str],
+        hierarchical: bool = True,
+    ) -> set[str]:
         """
-        Return the list of SQL schemas accessible by the user.
+        Returned a filtered list of the schemas accessible by the user.
+
+        If not catalog is specified, the default catalog is used.
 
         :param database: The SQL database
-        :param schemas: The list of eligible SQL schemas
+        :param catalog: An optional database catalog
+        :param schemas: A set of candidate schemas
         :param hierarchical: Whether to check using the hierarchical permission logic
-        :returns: The list of accessible SQL schemas
+        :returns: The set of accessible database schemas
         """
 
         # pylint: disable=import-outside-toplevel
         from superset.connectors.sqla.models import SqlaTable
 
-        if hierarchical and self.can_access_database(database):
+        if hierarchical and (
+            self.can_access_database(database)
+            or self.can_access_catalog(database, catalog)
+        ):
             return schemas
 
         # schema_access
-        accessible_schemas = {
-            self.unpack_database_and_schema(s).schema
-            for s in self.user_view_menu_names("schema_access")
-            if s.startswith(f"[{database}].")
-        }
+        accessible_schemas: set[str] = set()
+        schema_access = self.user_view_menu_names("schema_access")
+        default_catalog = database.get_default_catalog()
+        default_schema = database.get_default_schema()
+
+        for perm in schema_access:
+            parts = [part[1:-1] for part in perm.split(".")]
+
+            if parts[0] != database.database_name:
+                continue
+
+            # [database].[schema] matches when no catalog is specified, or when the user
+            # specifies the default catalog
+            if len(parts) == 2 and (catalog is None or catalog == default_catalog):
+                accessible_schemas.add(parts[1])
+
+            # [database].[catalog].[schema] matches when the catalog is equal to the
+            # requested catalog or, when no catalog specified, it's equal to the default
+            # catalog.
+            elif len(parts) == 3 and parts[1] == (catalog or default_catalog):
+                accessible_schemas.add(parts[2])
 
         # datasource_access
         if perms := self.user_view_menu_names("datasource_access"):
             tables = (
                 self.get_session.query(SqlaTable.schema)
                 .filter(SqlaTable.database_id == database.id)
-                .filter(SqlaTable.schema.isnot(None))
-                .filter(SqlaTable.schema != "")
                 .filter(or_(SqlaTable.perm.in_(perms)))
                 .distinct()
             )
-            accessible_schemas.update([table.schema for table in tables])
+            accessible_schemas.update(
+                {
+                    table.schema or default_schema
+                    for table in tables
+                    if (table.schema or default_schema)
+                }
+            )
 
-        return [s for s in schemas if s in accessible_schemas]
+        return schemas & accessible_schemas
+
+    def get_catalogs_accessible_by_user(
+        self,
+        database: "Database",
+        catalogs: set[str],
+        hierarchical: bool = True,
+    ) -> set[str]:
+        """
+        Returned a filtered list of the catalogs accessible by the user.
+
+        :param database: The SQL database
+        :param catalogs: A set of candidate catalogs
+        :param hierarchical: Whether to check using the hierarchical permission logic
+        :returns: The set of accessible database catalogs
+        """
+        # pylint: disable=import-outside-toplevel
+        from superset.connectors.sqla.models import SqlaTable
+
+        if hierarchical and self.can_access_database(database):
+            return catalogs
+
+        # catalog access
+        accessible_catalogs: set[str] = set()
+        catalog_access = self.user_view_menu_names("catalog_access")
+        default_catalog = database.get_default_catalog()
+
+        for perm in catalog_access:
+            parts = [part[1:-1] for part in perm.split(".")]
+            if parts[0] == database.database_name:
+                accessible_catalogs.add(parts[1])
+
+        # schema access
+        schema_access = self.user_view_menu_names("schema_access")
+        for perm in schema_access:
+            parts = [part[1:-1] for part in perm.split(".")]
+
+            if parts[0] != database.database_name:
+                continue
+            if len(parts) == 2 and default_catalog:
+                accessible_catalogs.add(default_catalog)
+            elif len(parts) == 3:
+                accessible_catalogs.add(parts[2])
+
+        # datasource_access
+        if perms := self.user_view_menu_names("datasource_access"):
+            tables = (
+                self.get_session.query(SqlaTable.schema)
+                .filter(SqlaTable.database_id == database.id)
+                .filter(or_(SqlaTable.perm.in_(perms)))
+                .distinct()
+            )
+            accessible_catalogs.update(
+                {
+                    table.catalog or default_catalog
+                    for table in tables
+                    if (table.catalog or default_catalog)
+                }
+            )
+
+        return catalogs & accessible_catalogs
 
     def get_datasources_accessible_by_user(  # pylint: disable=invalid-name
         self,
@@ -763,6 +902,7 @@ class SupersetSecurityManager(  # pylint: disable=too-many-public-methods
         if self.can_access_database(database):
             return datasource_names
 
+        # XXX
         if schema:
             schema_perm = self.get_schema_perm(database, schema)
             if schema_perm and self.can_access("schema_access", schema_perm):
@@ -1234,6 +1374,7 @@ class SupersetSecurityManager(  # pylint: disable=too-many-public-methods
         :param target: The database object
         :return: A list of changed view menus (permission resource names)
         """
+        # XXX
         view_menu_table = self.viewmenu_model.__table__  # pylint: disable=no-member
         new_database_name = target.database_name
         old_view_menu_name = self.get_database_perm(target.id, old_database_name)
@@ -1400,7 +1541,9 @@ class SupersetSecurityManager(  # pylint: disable=too-many-public-methods
 
         if target.schema:
             dataset_schema_perm = self.get_schema_perm(
-                database.database_name, target.schema
+                database.database_name,
+                target.catalog,
+                target.schema,
             )
             self._insert_pvm_on_sqla_event(
                 mapper, connection, "schema_access", dataset_schema_perm
@@ -1480,7 +1623,9 @@ class SupersetSecurityManager(  # pylint: disable=too-many-public-methods
 
             # Updates schema permissions
             new_dataset_schema_name = self.get_schema_perm(
-                target.database.database_name, target.schema
+                target.database.database_name,
+                target.catalog,
+                target.schema,
             )
             self._update_dataset_schema_perm(
                 mapper,
@@ -1504,7 +1649,9 @@ class SupersetSecurityManager(  # pylint: disable=too-many-public-methods
         # When schema changes
         if current_schema != target.schema:
             new_dataset_schema_name = self.get_schema_perm(
-                target.database.database_name, target.schema
+                target.database.database_name,
+                target.catalog,
+                target.schema,
             )
             self._update_dataset_schema_perm(
                 mapper,
@@ -1980,7 +2127,11 @@ class SupersetSecurityManager(  # pylint: disable=too-many-public-methods
             denied = set()
 
             for table_ in tables:
-                schema_perm = self.get_schema_perm(database, schema=table_.schema)
+                schema_perm = self.get_schema_perm(
+                    database,
+                    table.catalog,
+                    table_.schema,
+                )
 
                 if not (schema_perm and self.can_access("schema_access", schema_perm)):
                     datasources = SqlaTable.query_datasources_by_name(

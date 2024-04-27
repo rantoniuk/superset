@@ -175,7 +175,9 @@ class DatasourceKind(StrEnum):
     PHYSICAL = "physical"
 
 
-class BaseDatasource(AuditMixinNullable, ImportExportMixin):  # pylint: disable=too-many-public-methods
+class BaseDatasource(
+    AuditMixinNullable, ImportExportMixin
+):  # pylint: disable=too-many-public-methods
     """A common interface to objects that are queryable
     (tables and datasources)"""
 
@@ -1263,7 +1265,11 @@ class SqlaTable(
 
     def get_schema_perm(self) -> str | None:
         """Returns schema permission if present, database one otherwise."""
-        return security_manager.get_schema_perm(self.database, self.schema or None)
+        return security_manager.get_schema_perm(
+            self.database.database_name,
+            self.catalog,
+            self.schema or None,
+        )
 
     def get_perm(self) -> str:
         """

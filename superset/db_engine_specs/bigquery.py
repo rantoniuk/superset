@@ -464,7 +464,7 @@ class BigQueryEngineSpec(BaseEngineSpec):  # pylint: disable=too-many-public-met
         cls,
         database: Database,
         inspector: Inspector,
-    ) -> list[str]:
+    ) -> set[str]:
         """
         Get all catalogs.
 
@@ -475,7 +475,7 @@ class BigQueryEngineSpec(BaseEngineSpec):  # pylint: disable=too-many-public-met
             client = cls._get_client(engine)
             projects = client.list_projects()
 
-        return sorted(project.project_id for project in projects)
+        return {project.project_id for project in projects}
 
     @classmethod
     def get_allow_cost_estimate(cls, extra: dict[str, Any]) -> bool:

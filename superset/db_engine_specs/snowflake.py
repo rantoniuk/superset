@@ -174,18 +174,18 @@ class SnowflakeEngineSpec(PostgresBaseEngineSpec):
         cls,
         database: "Database",
         inspector: Inspector,
-    ) -> list[str]:
+    ) -> set[str]:
         """
         Return all catalogs.
 
         In Snowflake, a catalog is called a "database".
         """
-        return sorted(
+        return {
             catalog
             for (catalog,) in inspector.bind.execute(
                 "SELECT DATABASE_NAME from information_schema.databases"
             )
-        )
+        }
 
     @classmethod
     def epoch_to_dttm(cls) -> str:

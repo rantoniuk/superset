@@ -117,7 +117,9 @@ class ConfigurationMethod(StrEnum):
     DYNAMIC_FORM = "dynamic_form"
 
 
-class Database(Model, AuditMixinNullable, ImportExportMixin):  # pylint: disable=too-many-public-methods
+class Database(
+    Model, AuditMixinNullable, ImportExportMixin
+):  # pylint: disable=too-many-public-methods
     """An ORM object that stores Database related information"""
 
     __tablename__ = "dbs"
@@ -312,6 +314,14 @@ class Database(Model, AuditMixinNullable, ImportExportMixin):  # pylint: disable
     @property
     def metadata_cache_timeout(self) -> dict[str, Any]:
         return self.get_extra().get("metadata_cache_timeout", {})
+
+    @property
+    def catalog_cache_enabled(self) -> bool:
+        return "catalog_cache_timeout" in self.metadata_cache_timeout
+
+    @property
+    def catalog_cache_timeout(self) -> int | None:
+        return self.metadata_cache_timeout.get("catalog_cache_timeout")
 
     @property
     def schema_cache_enabled(self) -> bool:
@@ -548,6 +558,18 @@ class Database(Model, AuditMixinNullable, ImportExportMixin):  # pylint: disable
                     cursor.execute(prequery)
 
                 yield conn
+
+    def get_default_catalog(self) -> str | None:
+        """
+        Return the default configured catalog for the database.
+        """
+        return self.db_engine_spec.get_default_catalog(self)
+
+    def get_default_schema(self, catalog: str | None) -> str | None:
+        """
+        Return the default schema for the database.
+        """
+        return self.db_engine_spec.get_default_catalog(self, catalog)
 
     def get_default_schema_for_query(self, query: Query) -> str | None:
         """
@@ -792,22 +814,17 @@ class Database(Model, AuditMixinNullable, ImportExportMixin):  # pylint: disable
         key="db:{self.id}:schema_list",
         cache=cache_manager.cache,
     )
-    def get_all_schema_names(  # pylint: disable=unused-argument
+    def get_all_schema_names(
         self,
+        *,
         catalog: str | None = None,
-        cache: bool = False,
-        cache_timeout: int | None = None,
-        force: bool = False,
         ssh_tunnel: SSHTunnel | None = None,
-    ) -> list[str]:
-        """Parameters need to be passed as keyword arguments.
+    ) -> set[str]:
+        """
+        Return the schemas in a given database
 
-        For unused parameters, they are referenced in
-        cache_util.memoized_func decorator.
-
-        :param cache: whether cache is enabled for the function
-        :param cache_timeout: timeout in seconds for the cache
-        :param force: whether to force refresh the cache
+        :param catalog: override default catalog
+        :param ssh_tunnel: SSH tunnel information needed to establish a connection
         :return: schema list
         """
         try:
@@ -816,6 +833,27 @@ class Database(Model, AuditMixinNullable, ImportExportMixin):  # pylint: disable
                 ssh_tunnel=ssh_tunnel,
             ) as inspector:
                 return self.db_engine_spec.get_schema_names(inspector)
+        except Exception as ex:
+            raise self.db_engine_spec.get_dbapi_mapped_exception(ex) from ex
+
+    @cache_util.memoized_func(
+        key="db:{self.id}:catalog_list",
+        cache=cache_manager.cache,
+    )
+    def get_all_catalog_names(
+        self,
+        *,
+        ssh_tunnel: SSHTunnel | None = None,
+    ) -> list[str]:
+        """
+        Return the catalogs in a given database
+
+        :param ssh_tunnel: SSH tunnel information needed to establish a connection
+        :return: catalog list
+        """
+        try:
+            with self.get_inspector(ssh_tunnel=ssh_tunnel) as inspector:
+                return self.db_engine_spec.get_catalog_names(self, inspector)
         except Exception as ex:
             raise self.db_engine_spec.get_dbapi_mapped_exception(ex) from ex
 
